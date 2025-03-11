@@ -1,0 +1,88 @@
+stages:
+  - validate
+  - test
+  - deploy-staging
+  - deploy-production
+
+variables:
+  SUMO_ACCESS_ID: ${SUMO_ACCESS_ID}
+  SUMO_ACCESS_KEY: ${SUMO_ACCESS_KEY}
+  STAGING_ENDPOINT: ${STAGING_ENDPOINT}
+  PRODUCTION_ENDPOINT: ${PRODUCTION_ENDPOINT}
+
+# Validate TOML/JSON syntax and MITRE mappings
+validate-detections:
+  stage: validate
+  image: python:3.9
+  script:
+    - pip install pyyaml requests jsonschema
+    - python development/validate_detections.py
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" || $CI_COMMIT_BRANCH == "main"'
+      changes:
+        - detections/**/*.{toml,json,yaml,yml}
+
+# Test detections against sample logs
+test-detections:
+  stage: test
+  image: python:3.9
+  script:
+    - pip install pyyaml requests terraform-local
+    - python development/test_detections.py
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" || $CI_COMMIT_BRANCH == "main"'
+      changes:
+        - detections/**/*.{toml,json,yaml,yml}
+
+# Deploy to staging environment
+deploy-staging:
+  stage: deploy-staging
+  image: hashicorp/terraform:latest
+  script:
+    - cd terraform
+    - terraform init
+    - terraform workspace select staging || terraform workspace new staging
+    - terraform plan -var="sumo_access_id=$SUMO_ACCESS_ID" -var="sumo_access_key=$SUMO_ACCESS_KEY" -var="sumo_endpoint=$STAGING_ENDPOINT" -out=tfplan
+    - terraform apply tfplan
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" || $CI_COMMIT_BRANCH == "main"'
+      changes:
+        - detections/**/*.{toml,json,yaml,yml}
+        - terraform/**/*.tf
+  artifacts:
+    paths:
+      - terraform/tfplan
+    expire_in: 1 week
+
+# Deploy to production (requires manual approval)
+deploy-production:
+  stage: deploy-production
+  image: hashicorp/terraform:latest
+  script:
+    - cd terraform
+    - terraform init
+    - terraform workspace select production || terraform workspace new production
+    - terraform plan -var="sumo_access_id=$SUMO_ACCESS_ID" -var="sumo_access_key=$SUMO_ACCESS_KEY" -var="sumo_endpoint=$PRODUCTION_ENDPOINT" -out=tfplan
+    - terraform apply tfplan
+  when: manual
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes:
+        - detections/**/*.{toml,json,yaml,yml}
+        - terraform/**/*.tf
+  dependencies:
+    - deploy-staging
+
+# Generate detection metrics
+metrics:
+  stage: validate
+  image: python:3.9
+  script:
+    - pip install pyyaml requests
+    - python metrics/generate_metrics.py
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  artifacts:
+    paths:
+      - metrics/report.json
+    expire_in: 30 days 
